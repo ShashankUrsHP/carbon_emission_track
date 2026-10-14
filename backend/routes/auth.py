@@ -1,6 +1,5 @@
 import os
-import smtplib
-from email.mime.text import MIMEText
+import requests
 from datetime import timedelta
 from flask import Blueprint, request, jsonify, current_app
 from werkzeug.utils import secure_filename
@@ -54,26 +53,59 @@ OTP_REQUEST_COOLDOWN_SECONDS = 60
 
 
 def try_send_email(to_address, subject, body):
-    """Sends via SMTP if SMTP_HOST/SMTP_USER/SMTP_PASSWORD are set in .env.
-    Returns True if actually sent, False if it fell back to dev mode (no error raised)."""
-    host = os.getenv("SMTP_HOST")
-    user = os.getenv("SMTP_USER")
-    password = os.getenv("SMTP_PASSWORD")
-    port = int(os.getenv("SMTP_PORT", 587))
-    if not (host and user and password):
+    """Send email through Brevo's HTTPS transactional email API.
+
+    Required Render environment variables:
+      - BREVO_API_KEY
+      - BREVO_FROM_EMAIL (must be a sender registered/verified in Brevo)
+
+    Returns True only when Brevo accepts the message.
+    """
+    api_key = os.getenv("BREVO_API_KEY")
+    sender_email = os.getenv("BREVO_FROM_EMAIL")
+    if not api_key or not sender_email:
+        current_app.logger.error(
+            "Brevo email is not configured: set BREVO_API_KEY and BREVO_FROM_EMAIL."
+        )
         return False
+
     try:
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = user
-        msg["To"] = to_address
-        with smtplib.SMTP(host, port, timeout=10) as server:
-            server.starttls()
-            server.login(user, password)
-            server.sendmail(user, [to_address], msg.as_string())
-        return True
-    except Exception as e:
-        print(f"[SMTP] Failed to send email to {to_address}: {e}")
+        response = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={
+                "api-key": api_key,
+                "accept": "application/json",
+                "content-type": "application/json",
+            },
+            json={
+                "sender": {
+                    "name": os.getenv("BREVO_SENDER_NAME", "CarbonTrack"),
+                    "email": sender_email,
+                },
+                "to": [{"email": to_address}],
+                "subject": subject,
+                "textContent": body,
+            },
+            timeout=15,
+        )
+        if response.status_code in (200, 201, 202):
+            current_app.logger.info(
+                "Brevo accepted an email for recipient %s (HTTP %s).",
+                to_address,
+                response.status_code,
+            )
+            return True
+
+        # Avoid logging the API key or OTP/body. Brevo's error body is useful
+        # for configuration diagnosis but may contain account details, so cap it.
+        current_app.logger.error(
+            "Brevo rejected email (HTTP %s): %s",
+            response.status_code,
+            response.text[:300],
+        )
+        return False
+    except requests.RequestException as exc:
+        current_app.logger.error("Brevo API request failed: %s", type(exc).__name__)
         return False
 
 
@@ -169,11 +201,24 @@ def request_otp():
         f"Your OTP is {code}. It expires in {OTP_EXPIRY_MINUTES} minutes.\n\nIf you didn't request this, ignore this email.",
     )
 
-    print(f"[OTP] {identifier} -> {code} (expires in {OTP_EXPIRY_MINUTES} min) {'[sent via SMTP]' if sent_live else '[dev mode / no provider configured]'}")
-    resp = {"message": "OTP sent successfully" if sent_live else "OTP generated (dev mode — no email provider configured)"}
-    if dev_mode and not sent_live:
-        resp["dev_otp"] = code  # exposed only when no real provider is wired
-    return jsonify(resp)
+    # Never write the OTP itself to application logs.
+    if sent_live:
+        return jsonify({"message": "OTP sent successfully"})
+
+    # Local development fallback only. Set DEV_MODE=false on Render so a
+    # failed provider request never exposes a real user's OTP in the response.
+    if dev_mode:
+        current_app.logger.warning(
+            "OTP email delivery failed for %s; returning development OTP because DEV_MODE=true.",
+            identifier,
+        )
+        return jsonify({
+            "message": "OTP generated (development mode — email delivery failed)",
+            "dev_otp": code,
+        })
+
+    current_app.logger.error("OTP email delivery failed for %s.", identifier)
+    return jsonify({"error": "Unable to send verification email right now. Please try again later."}), 503
 
 
 @auth_bp.route("/otp/verify", methods=["POST"])
