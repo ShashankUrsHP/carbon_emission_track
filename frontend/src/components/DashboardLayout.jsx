@@ -109,7 +109,7 @@ export default function DashboardLayout({ nav, children, title }) {
         </div>
       )}
       {/* Mobile top bar */}
-      <div className={`glass-strong trip-console-trim fixed inset-x-0 z-[var(--z-header)] flex items-center justify-between px-4 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top,0px))] md:hidden ${isOnline ? "top-0" : "top-[calc(1.75rem+env(safe-area-inset-top,0px))]"}`}>
+      <div className={`glass-strong mobile-topbar trip-console-trim fixed inset-x-0 z-[var(--z-header)] flex items-center justify-between px-4 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top,0px))] md:hidden ${isOnline ? "top-0" : "top-[calc(1.75rem+env(safe-area-inset-top,0px))]"}`}>
         <span className="flex items-center gap-2 font-display text-sm font-semibold text-ink">
           <span className="glow-chip-cyan flex h-7 w-7 items-center justify-center rounded-lg text-success"><Leaf size={14} /></span>
           Carbon<span className="text-amber">Track</span>
@@ -219,7 +219,7 @@ export default function DashboardLayout({ nav, children, title }) {
       </aside>
 
       {/* Content */}
-      <main className={`ml-0 flex-1 px-5 pb-16 pt-[calc(5rem+env(safe-area-inset-top,0px))] transition-[margin] duration-300 ease-out md:px-8 md:pt-8 ${collapsed ? "md:ml-[4.5rem]" : "md:ml-64"}`}>
+      <main className={`ml-0 flex-1 px-5 pb-16 pt-[calc(5.5rem+env(safe-area-inset-top,0px))] transition-[margin] duration-300 ease-out md:px-8 md:pt-8 ${collapsed ? "md:ml-[4.5rem]" : "md:ml-64"}`}>
         {title ? (
           <div className="trip-console-trim glass mb-6 flex items-center justify-between gap-3 rounded-2xl px-5 py-4">
             <div className="flex items-center gap-3">

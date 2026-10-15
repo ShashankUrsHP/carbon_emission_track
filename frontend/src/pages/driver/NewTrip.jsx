@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Fuel, Leaf, DollarSign, Wrench, Gauge, CloudRain, CheckCircle2, Check, Navigation, MapPinned, Siren, AlertOctagon, LocateFixed, Milestone, Volume2, VolumeX, X, AlertTriangle, PartyPopper, Lock, LockOpen, MessageCircle, UserCog } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -152,6 +152,20 @@ function computeRouteBadges(routeOptions, routeEstimates) {
     }
   }
   return { fastestIdx, shortestIdx, recommendedIdx };
+}
+
+// Colors each route by CO2: lowest = green, highest = red, in between = yellow.
+// Uses the AI CO2 estimate when available; until it loads (or if it fails) it
+// falls back to distance so the lines are never an unexplained purple/indigo.
+// A single route (or all-equal values) is simply "lowest" = green.
+const CO2_GREEN = "#22C55E", CO2_YELLOW = "#FACC15", CO2_RED = "#EF4444";
+function routeColorsFor(routeOptions, routeEstimates) {
+  const vals = routeOptions.map((r, i) => {
+    const co2 = routeEstimates?.[i]?.predicted_co2_kg;
+    return typeof co2 === "number" ? co2 : (r.distance_km ?? 0);
+  });
+  const min = Math.min(...vals), max = Math.max(...vals);
+  return vals.map((v) => (max - min < 1e-9 || v === min ? CO2_GREEN : v === max ? CO2_RED : CO2_YELLOW));
 }
 
 const PLACE_TYPES = [
@@ -989,52 +1003,65 @@ export default function NewTrip() {
   useEffect(() => () => { if ("speechSynthesis" in window) window.speechSynthesis.cancel(); }, []);
 
   // --- Route comparison map: draws all fetched route polylines simultaneously,
-  // color-coded by predicted CO2 (green = lowest, amber = mid, red = highest). ---
+  // color-coded by CO2 (green = lowest, yellow = medium, red = highest). ---
+  const routeColors = useMemo(() => routeColorsFor(routeOptions, routeEstimates), [routeOptions, routeEstimates]);
+  const routeMapRef = useRef(null);      // { map, lines: [] } for the comparison map
   useEffect(() => {
     if (stage !== "routes" || !mapsKey || routeOptions.length === 0 || !routeMapNode) return;
     let cancelled = false;
     (async () => {
       const google = await loadGoogleMaps(mapsKey).catch(() => null);
       if (!google || cancelled || !routeMapNode) return;
-
       try {
-        const map = new google.maps.Map(routeMapNode, {
-          zoom: 7, center: { lat: 20.5937, lng: 78.9629 }, disableDefaultUI: true,
-          styles: DARK_MAP_STYLE,
-        });
-
-        // Rank routes by CO2 (if estimates are in yet) to assign colors low->high.
-        const co2Values = routeEstimates.map((e) => e?.predicted_co2_kg ?? null);
-        const validValues = co2Values.filter((v) => v !== null);
-        const sorted = [...new Set(validValues)].sort((a, b) => a - b);
-        const colorFor = (co2) => {
-          if (co2 == null || sorted.length < 2) return "#6E6BFF"; // indigo fallback while estimates load
-          if (co2 === sorted[0]) return "#4ADE80"; // lowest CO2 = green
-          if (co2 === sorted[sorted.length - 1]) return "#FF6B6B"; // highest CO2 = red
-          return "#F0B429"; // middle = amber
-        };
+        // Create the map once per container, then only redraw the lines.
+        if (!routeMapRef.current || routeMapRef.current.node !== routeMapNode) {
+          routeMapRef.current = {
+            node: routeMapNode, lines: [], markers: [], fitted: false,
+            map: new google.maps.Map(routeMapNode, {
+              zoom: 7, center: { lat: 12.97, lng: 77.59 }, disableDefaultUI: true,
+              gestureHandling: "greedy", styles: DARK_MAP_STYLE,
+            }),
+          };
+        }
+        const state = routeMapRef.current;
+        state.lines.forEach((l) => l.setMap(null));
+        state.markers.forEach((m) => m.setMap(null));
+        state.lines = []; state.markers = [];
 
         const bounds = new google.maps.LatLngBounds();
-        routeOptions.forEach((route, i) => {
+        const order = routeOptions.map((_, i) => i).sort((a, b) => (a === chosenRouteIdx) - (b === chosenRouteIdx));
+        order.forEach((i) => {
+          const route = routeOptions[i];
           if (!route.polyline) return;
           const path = google.maps.geometry.encoding.decodePath(route.polyline);
-          path.forEach((p) => bounds.extend(p));
+          path.forEach((pt) => bounds.extend(pt));
           const isChosen = i === chosenRouteIdx;
-          new google.maps.Polyline({
-            path, map,
-            strokeColor: colorFor(co2Values[i]),
-            strokeOpacity: isChosen ? 0.95 : 0.55,
-            strokeWeight: isChosen ? 6 : 4,
-            zIndex: isChosen ? 10 : 1,
+          // Dark casing under each line so the color stays readable on the dark map.
+          state.lines.push(new google.maps.Polyline({
+            path, map: state.map, clickable: false, strokeColor: "#05070d",
+            strokeOpacity: 0.9, strokeWeight: isChosen ? 10 : 8, zIndex: isChosen ? 9 : 1,
+          }));
+          const line = new google.maps.Polyline({
+            path, map: state.map, strokeColor: routeColors[i],
+            strokeOpacity: isChosen ? 1 : 0.8, strokeWeight: isChosen ? 6 : 4, zIndex: isChosen ? 10 : 2,
           });
+          line.addListener("click", () => setChosenRouteIdx(i));
+          state.lines.push(line);
+          if (isChosen) {
+            state.markers.push(new google.maps.Marker({ position: path[0], map: state.map, label: "A" }));
+            state.markers.push(new google.maps.Marker({ position: path[path.length - 1], map: state.map, label: "B" }));
+          }
         });
-        if (!bounds.isEmpty()) map.fitBounds(bounds, 40);
+        if (!bounds.isEmpty() && !state.fitted) { state.map.fitBounds(bounds, 40); state.fitted = true; }
       } catch (err) {
         console.error("Route comparison map drawing failed:", err);
       }
     })();
     return () => { cancelled = true; };
-  }, [stage, mapsKey, routeOptions, routeEstimates, chosenRouteIdx, routeMapNode]);
+  }, [stage, mapsKey, routeOptions, routeColors, chosenRouteIdx, routeMapNode]);
+
+  // Reset the cached comparison map whenever we leave the route step or get new routes.
+  useEffect(() => { routeMapRef.current = null; }, [stage, routeOptions]);
 
   // ---- End Trip ----------------------------------------------------------
   // The driver never ends a trip with a single click: clicking "End Trip"
@@ -1538,9 +1565,9 @@ export default function NewTrip() {
             <GlassCard strong className="overflow-hidden p-0">
               <div ref={setRouteMapNode} className="h-56 w-full" />
               <div className="flex flex-wrap items-center gap-4 border-b border-white/10 bg-white/[0.02] px-4 py-2 text-[11px] text-ink-faint">
-                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-success" /> Lowest CO2</span>
-                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-amber" /> Medium</span>
-                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-danger" /> Highest CO2</span>
+                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ background: CO2_GREEN }} /> Lowest CO2</span>
+                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ background: CO2_YELLOW }} /> Medium</span>
+                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ background: CO2_RED }} /> Highest CO2</span>
                 {estimatesLoading && <span className="ml-auto">{t("newTrip.estimatingCo2")}</span>}
               </div>
 
@@ -1568,7 +1595,7 @@ export default function NewTrip() {
                               className={`flex w-full items-center justify-between rounded-xl border px-4 py-3 text-left transition-colors ${chosenRouteIdx === i ? "border-amber/50 bg-amber/5" : "border-white/10 bg-white/[0.02] hover:border-white/20"}`}>
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <p className="text-sm font-medium text-ink">{r.label}</p>
+                            <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: routeColors[i] }} /><p className="text-sm font-medium text-ink">{r.label}</p>
                             {i === recommendedIdx && <Badge tone="warning">{t("newTrip.recommended", { defaultValue: "Recommended" })}</Badge>}
                             {i === fastestIdx && <Badge tone="neutral">{t("newTrip.fastest", { defaultValue: "Fastest" })}</Badge>}
                             {i === shortestIdx && i !== fastestIdx && <Badge tone="neutral">{t("newTrip.shortest", { defaultValue: "Shortest" })}</Badge>}
